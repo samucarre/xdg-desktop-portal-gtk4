@@ -25,7 +25,9 @@ dialog, like the one in the macOS Finder. With the focus in the file list:
 Space still types a space in the search and location entries. Save and folder dialogs are unchanged.
 
 <p align="center">
-  <img src="static/quick-look.gif" alt="Quick Look: space opens the image, the arrows move through the files, space closes it" width="800">
+  <img src="static/grid.jpg" alt="An open dialog in grid view, with thumbnails in their true proportions" width="400">
+  <img src="static/quick-look.jpg" alt="Quick Look over the open dialog, showing a desktop screenshot" width="400"><br>
+  <sub>An open dialog in grid view, and Quick Look after pressing space. The sample files are screenshots of WayBian itself.</sub>
 </p>
 
 How it works: GTK 4 removed the file chooser's preview widget, and GtkFileChooser has no selection signal, so
@@ -42,7 +44,8 @@ The commits on top of upstream (`2372e15`) live in this branch, which is built a
 Hyprland on a MacBook Pro M3 Max). To try it, build and install as below from this branch.
 
 <p align="center">
-  <img src="static/quick-look.jpg" alt="Quick Look over an open dialog" width="800">
+  <img src="static/quick-look-portrait.jpg" alt="Quick Look with a portrait image fitted in the same window" width="800"><br>
+  <sub>A portrait image in the same fixed-size window, three files further with the arrow keys.</sub>
 </p>
 
 ### A note on thumbnails

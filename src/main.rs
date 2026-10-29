@@ -1,3 +1,7 @@
+// GtkFileChooser and GtkDialog are deprecated since GTK 4.10, and the v4_12 feature of gtk4
+// (ListView/GridView::scroll_to, used by Quick Look) turns every use of them into a warning.
+#![allow(deprecated)]
+
 use error_reporter::Report;
 
 mod cli;

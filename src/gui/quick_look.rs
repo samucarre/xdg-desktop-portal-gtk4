@@ -7,17 +7,20 @@
 
 use {
     gtk4::{
-        gdk::{prelude::TextureExt, Key, ModifierType, Texture},
+        gdk::{
+            prelude::{SurfaceExt, TextureExt},
+            Key, ModifierType, Texture,
+        },
         gio::{self, Cancellable, File, FileQueryInfoFlags, FileType},
         glib::{self, ControlFlow, Propagation},
         pango::WrapMode,
         prelude::{
             BoxExt, Cast, DisplayExt, EventControllerExt, FileChooserExt, FileExt, GtkWindowExt,
-            ListModelExt, MonitorExt, NativeExt, ObjectExt, SelectionModelExt, ToVariant,
+            IsA, ListModelExt, MonitorExt, NativeExt, ObjectExt, SelectionModelExt, ToVariant,
             WidgetExt,
         },
-        EventControllerKey, FileChooserDialog, GridView, Image, Justification, Label, ListView,
-        Orientation, Picture, PropagationPhase, Widget, Window,
+        ContentFit, EventControllerKey, FileChooserDialog, GridView, Image, Justification, Label,
+        ListView, Native, Orientation, Picture, PropagationPhase, Widget, Window,
     },
     std::{cell::RefCell, rc::Rc, time::Duration},
 };
@@ -52,6 +55,8 @@ impl PreviewView {
     fn new() -> Self {
         let picture = Picture::new();
         picture.set_can_shrink(true);
+        // Small images keep their size instead of being blown up.
+        picture.set_content_fit(ContentFit::ScaleDown);
         picture.set_vexpand(true);
         let icon = Image::new();
         icon.set_pixel_size(256);
@@ -218,7 +223,7 @@ fn open_quick_look(dialog: &FileChooserDialog, shown: &Shown, uri: String, quick
     window.set_destroy_with_parent(true);
     window.set_title(Some(&shown.name));
     window.set_child(Some(&view.content));
-    let (width, height) = quick_look_size(dialog, shown.texture.as_ref());
+    let (width, height) = quick_look_size(dialog);
     window.set_default_size(width, height);
     view.show(shown);
 
@@ -258,23 +263,16 @@ fn open_quick_look(dialog: &FileChooserDialog, shown: &Shown, uri: String, quick
     window.present();
 }
 
-/// Fits the image in 80 % of the monitor, leaving room for the labels.
-fn quick_look_size(dialog: &FileChooserDialog, texture: Option<&Texture>) -> (i32, i32) {
-    let (mw, mh) = dialog
+/// A fixed share of the monitor. Each image is fitted inside it: Wayland clients cannot move
+/// their windows, so a window that took the shape of each image would drift off centre (and
+/// off the screen) while moving through the files.
+fn quick_look_size(native: &impl IsA<Native>) -> (i32, i32) {
+    let (mw, mh) = native
         .surface()
-        .and_then(|s| dialog.display().monitor_at_surface(&s))
+        .and_then(|s| s.display().monitor_at_surface(&s))
         .map(|m| (m.geometry().width() as f64, m.geometry().height() as f64))
         .unwrap_or((1280.0, 800.0));
-    let Some(t) = texture else {
-        return (480, 420);
-    };
-    let (labels, margins) = (110.0, 48.0);
-    let scale = ((mw * 0.8 - margins) / t.width() as f64)
-        .min((mh * 0.85 - labels - margins) / t.height() as f64)
-        .min(1.0);
-    let width = t.width() as f64 * scale + margins;
-    let height = t.height() as f64 * scale + labels + margins;
-    ((width as i32).max(480), (height as i32).max(360))
+    (((mw * 0.7) as i32).max(480), ((mh * 0.8) as i32).max(360))
 }
 
 /// The view that shows the files: a grid view, or the list view inside the column view.

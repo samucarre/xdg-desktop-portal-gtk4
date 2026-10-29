@@ -31,8 +31,9 @@ Space still types a space in the search and location entries. Save and folder di
 How it works: GTK 4 removed the file chooser's preview widget, and GtkFileChooser has no selection signal, so
 [`src/gui/quick_look.rs`](src/gui/quick_look.rs) puts a key controller on the dialog (capture phase) and, while the
 preview is open, listens to the selection model of the dialog's file list. Files are decoded off the main thread
-(`gio::spawn_blocking` + `gdk::Texture`); the size is read from the header first, so that a small file that expands to
-gigabytes is decoded scaled down (above 40 megapixels) or not at all (above 100). The arrows use the list views' own
+(`gio::spawn_blocking` + `gdk::Texture`). For PNG, GIF, WebP and JPEG the size is read from the header first, so that a
+small file that expands to gigabytes is decoded scaled down (above 40 megapixels) or not at all (above 100); nothing
+over 64 MiB is decoded. The arrows use the list views' own
 `list.select-item` and `list.scroll-to-item` actions. The window opens at 70 % × 80 % of the monitor and keeps that
 size: a Wayland client cannot move its window, so a window that took the shape of each image would drift off centre
 while moving through the files.

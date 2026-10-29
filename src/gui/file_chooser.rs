@@ -3,20 +3,24 @@ use {
     async_channel::{Receiver, Sender},
     gdk4_wayland::WaylandToplevel,
     gtk4::{
-        gio::File,
-        glib::MainContext,
+        gdk::{prelude::TextureExt, Texture},
+        gio::{self, Cancellable, File, FileQueryInfoFlags, FileType},
+        glib::{self, ControlFlow, MainContext},
+        pango::WrapMode,
         prelude::{
-            Cast, DialogExt, FileChooserExt, FileChooserExtManual, FileExt, GtkWindowExt,
-            NativeExt, RecentManagerExt, WidgetExt,
+            BoxExt, Cast, DialogExt, FileChooserExt, FileChooserExtManual, FileExt, GtkWindowExt,
+            NativeExt, ObjectExt, OrientableExt, RecentManagerExt, WidgetExt,
         },
-        FileChooserAction, FileChooserDialog, FileFilter, RecentData, RecentManager, ResponseType,
-        Widget, Window,
+        FileChooserAction, FileChooserDialog, FileFilter, Image, Justification, Label,
+        Orientation, Picture, PolicyType, RecentData, RecentManager, ResponseType,
+        ScrolledWindow, Separator, Widget, Window,
     },
     rust_i18n::t,
     std::{
-        cell::Cell,
+        cell::{Cell, RefCell},
         collections::{HashMap, HashSet},
         rc::Rc,
+        time::Duration,
     },
     thiserror::Error,
 };
@@ -152,6 +156,9 @@ impl FileChooserUi {
             let _ = send.send_blocking(res);
             dialog.close();
         });
+        if dialog.action() == FileChooserAction::Open {
+            add_preview(&dialog);
+        }
         dialog.show();
         context.spawn_local(async move {
             let _ = close_on_close.recv().await;
@@ -254,6 +261,150 @@ fn map_filter(f: &Filter) -> FileFilter {
         }
     }
     gf
+}
+
+const PREVIEW_WIDTH: i32 = 320;
+// Images bigger than this are not decoded for the preview.
+const PREVIEW_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+struct PreviewData {
+    name: String,
+    content_type: String,
+    size: Option<u64>,
+    texture: Option<Texture>,
+}
+
+/// Adds a panel on the right that shows the selected file, like the preview column of the
+/// macOS Finder. GTK 4 dropped the preview widget and has no selection signal, so the
+/// selection is polled.
+fn add_preview(dialog: &FileChooserDialog) {
+    let picture = Picture::new();
+    picture.set_can_shrink(true);
+    picture.set_vexpand(true);
+    let icon = Image::new();
+    icon.set_pixel_size(128);
+    icon.set_vexpand(true);
+    let name = Label::new(None);
+    name.set_wrap(true);
+    name.set_wrap_mode(WrapMode::WordChar);
+    name.set_justify(Justification::Center);
+    name.add_css_class("heading");
+    let details = Label::new(None);
+    details.set_wrap(true);
+    details.set_justify(Justification::Center);
+    details.add_css_class("dim-label");
+    let content = gtk4::Box::new(Orientation::Vertical, 12);
+    content.set_margin_top(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    content.append(&picture);
+    content.append(&icon);
+    content.append(&name);
+    content.append(&details);
+    content.set_visible(false);
+    // The scrolled window keeps the natural size of big images from widening the panel.
+    let panel = ScrolledWindow::new();
+    panel.set_policy(PolicyType::Never, PolicyType::Never);
+    panel.set_propagate_natural_width(false);
+    panel.set_size_request(PREVIEW_WIDTH, -1);
+    panel.set_child(Some(&content));
+    let area = dialog.content_area();
+    area.set_orientation(Orientation::Horizontal);
+    area.append(&Separator::new(Orientation::Vertical));
+    area.append(&panel);
+
+    let shown = Rc::new(RefCell::new(None::<String>));
+    let weak = dialog.downgrade();
+    glib::timeout_add_local(Duration::from_millis(150), move || {
+        let Some(dialog) = weak.upgrade() else {
+            return ControlFlow::Break;
+        };
+        let file = dialog.file();
+        let uri = file.as_ref().map(|f| f.uri().to_string());
+        if *shown.borrow() == uri {
+            return ControlFlow::Continue;
+        }
+        *shown.borrow_mut() = uri.clone();
+        let Some(uri) = uri else {
+            content.set_visible(false);
+            return ControlFlow::Continue;
+        };
+        let (content, picture, icon, name, details, shown) = (
+            content.clone(),
+            picture.clone(),
+            icon.clone(),
+            name.clone(),
+            details.clone(),
+            shown.clone(),
+        );
+        glib::spawn_future_local(async move {
+            let u = uri.clone();
+            let Ok(data) = gio::spawn_blocking(move || load_preview(&u)).await else {
+                return;
+            };
+            // The selection changed while the file was loading.
+            if shown.borrow().as_deref() != Some(uri.as_str()) {
+                return;
+            }
+            let mut lines = vec![gio::content_type_get_description(&data.content_type).to_string()];
+            if let Some(t) = &data.texture {
+                lines.push(format!("{} × {}", t.width(), t.height()));
+            }
+            if let Some(s) = data.size {
+                lines.push(glib::format_size(s).to_string());
+            }
+            match &data.texture {
+                Some(t) => picture.set_paintable(Some(t)),
+                None => icon.set_from_gicon(&gio::content_type_get_icon(&data.content_type)),
+            }
+            picture.set_visible(data.texture.is_some());
+            icon.set_visible(data.texture.is_none());
+            name.set_label(&data.name);
+            details.set_label(&lines.join("\n"));
+            content.set_visible(true);
+        });
+        ControlFlow::Continue
+    });
+}
+
+fn load_preview(uri: &str) -> PreviewData {
+    let file = File::for_uri(uri);
+    let info = file
+        .query_info(
+            "standard::display-name,standard::content-type,standard::size,standard::type",
+            FileQueryInfoFlags::NONE,
+            Cancellable::NONE,
+        )
+        .ok();
+    let name = match &info {
+        Some(i) => i.display_name().to_string(),
+        None => file
+            .basename()
+            .map(|b| b.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    let content_type = info
+        .as_ref()
+        .and_then(|i| i.content_type())
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let size = info
+        .as_ref()
+        .filter(|i| i.file_type() != FileType::Directory)
+        .map(|i| i.size() as u64);
+    let texture = match size {
+        Some(s) if s <= PREVIEW_MAX_BYTES && content_type.starts_with("image/") => {
+            Texture::from_file(&file).ok()
+        }
+        _ => None,
+    };
+    PreviewData {
+        name,
+        content_type,
+        size,
+        texture,
+    }
 }
 
 fn add_recent(app_id: &str, uris: &[String]) {

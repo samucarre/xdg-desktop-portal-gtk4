@@ -4,6 +4,7 @@ use gtk4::{
 };
 
 pub mod file_chooser;
+mod file_preview;
 
 pub struct Ui {
     main_loop: MainLoop,

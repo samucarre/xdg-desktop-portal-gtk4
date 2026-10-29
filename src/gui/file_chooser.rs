@@ -1,6 +1,6 @@
 use {
     crate::{
-        gui::{file_preview::add_preview, UiProxy},
+        gui::{quick_look::add_quick_look, UiProxy},
         utils::file_chooser_ext::FileChooserExtManualFixed,
     },
     async_channel::{Receiver, Sender},
@@ -156,7 +156,7 @@ impl FileChooserUi {
             dialog.close();
         });
         if dialog.action() == FileChooserAction::Open {
-            add_preview(&dialog);
+            add_quick_look(&dialog);
         }
         dialog.show();
         context.spawn_local(async move {

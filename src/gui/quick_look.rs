@@ -1,9 +1,9 @@
-//! Previews for the open dialog, like the macOS Finder: a panel on the right that shows the
-//! selected file, and Quick Look (space opens a bigger preview, space or escape closes it,
-//! the arrows move through the files while it is open).
+//! Quick Look for the open dialog, like the macOS Finder: with the focus in the file list,
+//! space opens a bigger preview of the selected file, space or escape closes it and the
+//! arrows move through the files while it is open.
 //!
-//! GTK 4 dropped the file chooser preview widget and has no selection signal, so the
-//! selection is polled and files are loaded off the main thread.
+//! GTK 4 has no selection signal, so the selection is polled while the preview is open, and
+//! files are loaded off the main thread.
 
 use {
     gtk4::{
@@ -12,18 +12,16 @@ use {
         glib::{self, ControlFlow, Propagation},
         pango::WrapMode,
         prelude::{
-            BoxExt, Cast, DialogExt, DisplayExt, EventControllerExt, FileChooserExt, FileExt,
-            GtkWindowExt, ListModelExt, MonitorExt, NativeExt, ObjectExt, OrientableExt,
-            SelectionModelExt, ToVariant, WidgetExt,
+            BoxExt, Cast, DisplayExt, EventControllerExt, FileChooserExt, FileExt, GtkWindowExt,
+            ListModelExt, MonitorExt, NativeExt, ObjectExt, SelectionModelExt, ToVariant,
+            WidgetExt,
         },
         EventControllerKey, FileChooserDialog, GridView, Image, Justification, Label, ListView,
-        Orientation, Picture, PolicyType, PropagationPhase, ScrolledWindow, Separator, Widget,
-        Window,
+        Orientation, Picture, PropagationPhase, Widget, Window,
     },
     std::{cell::RefCell, rc::Rc, time::Duration},
 };
 
-const PANEL_WIDTH: i32 = 320;
 // Images bigger than this are not decoded for the preview.
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -34,7 +32,6 @@ struct PreviewData {
     texture: Option<Texture>,
 }
 
-#[derive(Clone)]
 struct Shown {
     name: String,
     details: String,
@@ -52,12 +49,12 @@ struct PreviewView {
 }
 
 impl PreviewView {
-    fn new(icon_size: i32, margin: i32) -> Self {
+    fn new() -> Self {
         let picture = Picture::new();
         picture.set_can_shrink(true);
         picture.set_vexpand(true);
         let icon = Image::new();
-        icon.set_pixel_size(icon_size);
+        icon.set_pixel_size(256);
         icon.set_vexpand(true);
         let name = Label::new(None);
         name.set_wrap(true);
@@ -69,10 +66,10 @@ impl PreviewView {
         details.set_justify(Justification::Center);
         details.add_css_class("dim-label");
         let content = gtk4::Box::new(Orientation::Vertical, 12);
-        content.set_margin_top(margin);
-        content.set_margin_bottom(margin);
-        content.set_margin_start(margin);
-        content.set_margin_end(margin);
+        content.set_margin_top(24);
+        content.set_margin_bottom(24);
+        content.set_margin_start(24);
+        content.set_margin_end(24);
         content.append(&picture);
         content.append(&icon);
         content.append(&name);
@@ -101,29 +98,21 @@ impl PreviewView {
     }
 }
 
-type QuickLook = Rc<RefCell<Option<(Window, PreviewView)>>>;
+struct QuickLookWindow {
+    window: Window,
+    view: PreviewView,
+    uri: String,
+}
 
-pub fn add_preview(dialog: &FileChooserDialog) {
-    let panel_view = PreviewView::new(128, 18);
-    panel_view.content.set_visible(false);
-    // The scrolled window keeps the natural size of big images from widening the panel.
-    let panel = ScrolledWindow::new();
-    panel.set_policy(PolicyType::Never, PolicyType::Never);
-    panel.set_propagate_natural_width(false);
-    panel.set_size_request(PANEL_WIDTH, -1);
-    panel.set_child(Some(&panel_view.content));
-    let area = dialog.content_area();
-    area.set_orientation(Orientation::Horizontal);
-    area.append(&Separator::new(Orientation::Vertical));
-    area.append(&panel);
+type QuickLook = Rc<RefCell<Option<QuickLookWindow>>>;
 
-    let current = Rc::new(RefCell::new(None::<Shown>));
+pub fn add_quick_look(dialog: &FileChooserDialog) {
     let quick_look: QuickLook = Default::default();
 
     let keys = EventControllerKey::new();
     keys.set_propagation_phase(PropagationPhase::Capture);
     let weak = dialog.downgrade();
-    let (c, q) = (current.clone(), quick_look.clone());
+    let q = quick_look.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
         let Some(dialog) = weak.upgrade() else {
             return Propagation::Proceed;
@@ -132,53 +121,46 @@ pub fn add_preview(dialog: &FileChooserDialog) {
         if key != Key::space || has_modifiers(mods) || !focus_in_file_list(&dialog) {
             return Propagation::Proceed;
         }
-        toggle_quick_look(&dialog, &c, &q);
+        toggle_quick_look(&dialog, &q);
         Propagation::Stop
     });
     dialog.add_controller(keys);
 
-    let selected = Rc::new(RefCell::new(None::<String>));
+    // Follows the selection while the preview is open.
     let weak = dialog.downgrade();
     glib::timeout_add_local(Duration::from_millis(150), move || {
         let Some(dialog) = weak.upgrade() else {
             return ControlFlow::Break;
         };
-        let file = dialog.file();
-        let uri = file.as_ref().map(|f| f.uri().to_string());
-        if *selected.borrow() == uri {
-            return ControlFlow::Continue;
-        }
-        *selected.borrow_mut() = uri.clone();
-        let Some(uri) = uri else {
-            panel_view.content.set_visible(false);
-            *current.borrow_mut() = None;
+        let Some(uri) = dialog.file().map(|f| f.uri().to_string()) else {
             return ControlFlow::Continue;
         };
-        let (panel_view, current, quick_look, selected) = (
-            panel_view.clone(),
-            current.clone(),
-            quick_look.clone(),
-            selected.clone(),
-        );
+        match quick_look.borrow_mut().as_mut() {
+            Some(q) if q.uri != uri => q.uri = uri.clone(),
+            _ => return ControlFlow::Continue,
+        }
+        let quick_look = quick_look.clone();
         glib::spawn_future_local(async move {
-            let u = uri.clone();
-            let Ok(data) = gio::spawn_blocking(move || load_preview(&u)).await else {
+            let Some(shown) = load(uri.clone()).await else {
                 return;
             };
-            // The selection changed while the file was loading.
-            if selected.borrow().as_deref() != Some(uri.as_str()) {
-                return;
+            // The selection may have moved on while the file was loading.
+            if let Some(q) = &*quick_look.borrow() {
+                if q.uri == uri {
+                    q.window.set_title(Some(&shown.name));
+                    q.view.show(&shown);
+                }
             }
-            let shown = shown(data);
-            panel_view.show(&shown);
-            if let Some((window, view)) = &*quick_look.borrow() {
-                window.set_title(Some(&shown.name));
-                view.show(&shown);
-            }
-            *current.borrow_mut() = Some(shown);
         });
         ControlFlow::Continue
     });
+}
+
+async fn load(uri: String) -> Option<Shown> {
+    gio::spawn_blocking(move || load_preview(&uri))
+        .await
+        .ok()
+        .map(shown)
 }
 
 fn shown(data: PreviewData) -> Shown {
@@ -206,20 +188,31 @@ fn has_modifiers(mods: ModifierType) -> bool {
     )
 }
 
-fn toggle_quick_look(
-    dialog: &FileChooserDialog,
-    current: &Rc<RefCell<Option<Shown>>>,
-    quick_look: &QuickLook,
-) {
+fn toggle_quick_look(dialog: &FileChooserDialog, quick_look: &QuickLook) {
     let open = quick_look.borrow_mut().take();
-    if let Some((window, _)) = open {
-        window.close();
+    if let Some(q) = open {
+        q.window.close();
         return;
     }
-    let Some(shown) = current.borrow().clone() else {
+    let Some(uri) = dialog.file().map(|f| f.uri().to_string()) else {
         return;
     };
-    let view = PreviewView::new(256, 24);
+    let (weak, quick_look) = (dialog.downgrade(), quick_look.clone());
+    glib::spawn_future_local(async move {
+        let Some(shown) = load(uri.clone()).await else {
+            return;
+        };
+        if quick_look.borrow().is_some() {
+            return;
+        }
+        if let Some(dialog) = weak.upgrade() {
+            open_quick_look(&dialog, &shown, uri, &quick_look);
+        }
+    });
+}
+
+fn open_quick_look(dialog: &FileChooserDialog, shown: &Shown, uri: String, quick_look: &QuickLook) {
+    let view = PreviewView::new();
     let window = Window::new();
     window.set_transient_for(Some(dialog));
     window.set_destroy_with_parent(true);
@@ -227,7 +220,7 @@ fn toggle_quick_look(
     window.set_child(Some(&view.content));
     let (width, height) = quick_look_size(dialog, shown.texture.as_ref());
     window.set_default_size(width, height);
-    view.show(&shown);
+    view.show(shown);
 
     let keys = EventControllerKey::new();
     let weak = dialog.downgrade();
@@ -257,7 +250,11 @@ fn toggle_quick_look(
         q.borrow_mut().take();
         Propagation::Proceed
     });
-    *quick_look.borrow_mut() = Some((window.clone(), view));
+    *quick_look.borrow_mut() = Some(QuickLookWindow {
+        window: window.clone(),
+        view,
+        uri,
+    });
     window.present();
 }
 

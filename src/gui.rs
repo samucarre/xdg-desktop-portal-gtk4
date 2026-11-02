@@ -5,6 +5,7 @@ use gtk4::{
 
 pub mod file_chooser;
 mod quick_look;
+mod thumbnailer;
 
 pub struct Ui {
     main_loop: MainLoop,

@@ -5,8 +5,11 @@
 //!
 //! GtkFileChooser has no selection signal of its own; while the preview is open it listens
 //! to the selection model of the dialog's file list. Files are decoded off the main thread.
+//! Images are decoded here; PDFs, videos and the rest are rendered by the thumbnailers of
+//! the system (see `thumbnailer.rs`).
 
 use {
+    super::thumbnailer,
     gtk4::{
         gdk::{
             prelude::{SurfaceExt, TextureExt},
@@ -45,6 +48,8 @@ const SCALE_ABOVE_PIXELS: i64 = 40_000_000;
 const SCALED_SIDE: i32 = 4096;
 // ...and above this they are not decoded at all: the preview shows the type icon.
 const MAX_PIXELS: i64 = 100_000_000;
+// Longer side asked from a thumbnailer for the files that are not images (PDF, video, ...).
+const THUMBNAIL_SIDE: i32 = 2048;
 
 struct PreviewData {
     name: String,
@@ -608,6 +613,11 @@ fn load_preview(uri: &str, generation: &AtomicU64, id: u64) -> Option<PreviewDat
             _ => Texture::from_file(&file).ok(),
         };
         dimensions = size_in_header.or_else(|| texture.as_ref().map(|t| (t.width(), t.height())));
+    } else if !image && size.is_some() && generation.load(Ordering::SeqCst) == id {
+        // Not an image (or too big to decode here): a thumbnailer of the system, if there is
+        // one for the type, renders the first page or a frame. The rendered size says nothing
+        // about the file, so it is not shown.
+        texture = thumbnailer::render(&file, &content_type, THUMBNAIL_SIDE, generation, id);
     }
     Some(PreviewData {
         name,

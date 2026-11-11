@@ -15,6 +15,12 @@ struct Cli {
 pub fn main() {
     let args = Cli::parse();
     let ui = Ui::new();
+    // GTK has to be initialized (and own the default main context) before the name is
+    // taken on the bus: when the portal is started by D-Bus activation, the request that
+    // started it arrives at once, and the zbus thread would otherwise run the UI closure
+    // itself before gtk::init ("GTK has not been initialized") or hold the main context so
+    // that gtk::init fails ("Failed to acquire default main context").
+    ui.init_gtk();
     let _portal = match Portal::create(ui.proxy(), args.replace) {
         Ok(p) => p,
         Err(e) => {
@@ -22,6 +28,5 @@ pub fn main() {
             std::process::exit(1);
         }
     };
-    ui.init_gtk();
     ui.run();
 }
